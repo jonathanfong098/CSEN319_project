@@ -189,6 +189,160 @@ __global__ void update_weights(
     }
 }
 
+#if defined(TEST_CUDA)
+void train_network_cuda(
+    double *d_weights,    // Pre-initialized device weights
+    double *h_dataset,    // Host dataset
+    double *h_targets,    // Host targets
+    int *layer_sizes,     // Layer sizes
+    int num_samples,      // Number of training samples
+    int input_size,       // Input size
+    int num_layers,       // Number of layers
+    int total_weights,    // Total number of weights
+    int epochs,           // Number of training epochs
+    double learning_rate, // Learning rate
+    int task              // Task type: 0 for regression, 1 for classification
+)
+{
+    // Timing events
+    cudaEvent_t start_init, stop_init, start_fp, stop_fp, start_bp, stop_bp, start_update, stop_update, start_total, stop_total;
+    cudaEventCreate(&start_init);
+    cudaEventCreate(&stop_init);
+    cudaEventCreate(&start_fp);
+    cudaEventCreate(&stop_fp);
+    cudaEventCreate(&start_bp);
+    cudaEventCreate(&stop_bp);
+    cudaEventCreate(&start_update);
+    cudaEventCreate(&stop_update);
+    cudaEventCreate(&start_total);
+    cudaEventCreate(&stop_total);
+
+    // Total training process start
+    cudaEventRecord(start_total);
+
+    // Allocate memory for inputs, outputs, errors, and gradients
+    cudaEventRecord(start_init);
+    double *d_inputs, *d_outputs, *d_errors, *d_gradients;
+    cudaMalloc(&d_inputs, input_size * sizeof(double));
+    cudaMalloc(&d_outputs, layer_sizes[num_layers - 1] * sizeof(double));
+    cudaMalloc(&d_errors, layer_sizes[num_layers - 1] * sizeof(double));
+    cudaMalloc(&d_gradients, total_weights * sizeof(double));
+    double *h_outputs = (double *)malloc(layer_sizes[num_layers - 1] * sizeof(double));
+    cudaEventRecord(stop_init);
+    cudaEventSynchronize(stop_init);
+
+    for (int epoch = 0; epoch < epochs; epoch++)
+    {
+        double total_loss = 0.0;
+
+        for (int sample_idx = 0; sample_idx < num_samples; sample_idx++)
+        {
+            // Forward propagation timing start
+            cudaEventRecord(start_fp);
+
+            // Copy the current input to the first layer
+            cudaMemcpy(d_inputs, &h_dataset[sample_idx * input_size], input_size * sizeof(double), cudaMemcpyHostToDevice);
+
+            // Forward propagation through the layers
+            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++)
+            {
+                int current_input_size = (layer_idx == 0) ? input_size : layer_sizes[layer_idx - 1];
+                int current_layer_size = layer_sizes[layer_idx];
+                int is_output_layer = (layer_idx == num_layers - 1);
+
+                forward_propagate<<<(current_layer_size + 255) / 256, 256>>>(
+                    d_inputs, d_weights, d_outputs, current_input_size, current_layer_size, is_output_layer, task);
+
+                cudaMemcpy(d_inputs, d_outputs, current_layer_size * sizeof(double), cudaMemcpyDeviceToDevice);
+            }
+
+            cudaEventRecord(stop_fp);
+            cudaEventSynchronize(stop_fp);
+
+            // Compute the error for the output layer
+            cudaMemcpy(d_errors, &h_targets[sample_idx * layer_sizes[num_layers - 1]],
+                       layer_sizes[num_layers - 1] * sizeof(double), cudaMemcpyHostToDevice);
+
+            if (task == 0) // Regression task
+            {
+                double loss = 0.0;
+                cudaMemcpy(h_outputs, d_outputs, layer_sizes[num_layers - 1] * sizeof(double), cudaMemcpyDeviceToHost);
+                for (int i = 0; i < layer_sizes[num_layers - 1]; i++)
+                {
+                    double prediction = h_outputs[i];
+                    double target = h_targets[sample_idx * layer_sizes[num_layers - 1] + i];
+                    loss += 0.5 * pow(prediction - target, 2); // Directly calculate loss
+                }
+                total_loss += loss;
+            }
+
+            // Backward propagation timing start
+            cudaEventRecord(start_bp);
+
+            // Backward propagation through the layers
+            for (int layer_idx = num_layers - 1; layer_idx >= 0; layer_idx--)
+            {
+                int current_input_size = (layer_idx == 0) ? input_size : layer_sizes[layer_idx - 1];
+                int current_layer_size = layer_sizes[layer_idx];
+                int is_output_layer = (layer_idx == num_layers - 1);
+
+                backward_propagate<<<(current_layer_size + 255) / 256, 256>>>(
+                    d_errors, d_outputs, d_weights, d_gradients, current_input_size, current_layer_size, is_output_layer, task);
+            }
+
+            cudaEventRecord(stop_bp);
+            cudaEventSynchronize(stop_bp);
+
+            // Weight update timing start
+            cudaEventRecord(start_update);
+
+            // Update weights
+            update_weights<<<(total_weights + 255) / 256, 256>>>(d_weights, d_gradients, learning_rate, total_weights);
+
+            cudaEventRecord(stop_update);
+            cudaEventSynchronize(stop_update);
+        }
+
+        total_loss /= num_samples;
+
+        // Print timing and loss
+        printf("Epoch %d: Total Loss: %.6f\n", epoch, total_loss);
+        // printf("Timing (ms): Init: %.3f, Forward: %.3f, Backward: %.3f, Update: %.3f, Total: %.3f\n",
+        //        time_init, time_fp, time_bp, time_update, time_total);
+    }
+    cudaEventRecord(stop_total);
+    cudaEventSynchronize(stop_total);
+
+    // Timing results
+    float time_init, time_fp, time_bp, time_update, time_total;
+    cudaEventElapsedTime(&time_init, start_init, stop_init);
+    cudaEventElapsedTime(&time_fp, start_fp, stop_fp);
+    cudaEventElapsedTime(&time_bp, start_bp, stop_bp);
+    cudaEventElapsedTime(&time_update, start_update, stop_update);
+    cudaEventElapsedTime(&time_total, start_total, stop_total);
+
+    printf("Timing(ms:)\n  Forward: %.3f, Backward: %.3f, Update: %.3f, Total: %.3f\n", time_fp, time_bp, time_update, time_total);
+
+    // Free resources
+    cudaFree(d_inputs);
+    cudaFree(d_outputs);
+    cudaFree(d_errors);
+    cudaFree(d_gradients);
+    free(h_outputs);
+
+    // Destroy timing events
+    cudaEventDestroy(start_init);
+    cudaEventDestroy(stop_init);
+    cudaEventDestroy(start_fp);
+    cudaEventDestroy(stop_fp);
+    cudaEventDestroy(start_bp);
+    cudaEventDestroy(stop_bp);
+    cudaEventDestroy(start_update);
+    cudaEventDestroy(stop_update);
+    cudaEventDestroy(start_total);
+    cudaEventDestroy(stop_total);
+}
+#else
 void train_network_cuda(
     double *d_weights,    // Pre-initialized device weights
     double *h_dataset,    // Host dataset
@@ -299,22 +453,6 @@ void train_network_cuda(
             update_weights<<<(total_weights + 255) / 256, 256>>>(d_weights, d_gradients, learning_rate, total_weights);
         }
 
-        // if (epoch % 10 == 0)
-        // { // Check weights every 10 epochs
-        //     double *h_weights = (double *)malloc(total_weights * sizeof(double));
-        //     cudaMemcpy(h_weights, d_weights, total_weights * sizeof(double), cudaMemcpyDeviceToHost);
-
-        //     printf("Epoch %d, Updated weights:\n", epoch);
-        //     for (int i = 0; i < 10; i++)
-        //     { // Print first 10 weights
-        //         printf("Weight[%d]: %f\n", i, h_weights[i]);
-        //     }
-        //     free(h_weights);
-        // }
-
-        // // Print the total loss for the current epoch
-        // printf("Epoch %d completed. Total Loss: %.6f\n", epoch, total_loss / num_samples);
-
         // Normalize total loss
         total_loss /= num_samples;
 
@@ -327,3 +465,4 @@ void train_network_cuda(
     cudaFree(d_gradients);
     free(h_outputs);
 }
+#endif

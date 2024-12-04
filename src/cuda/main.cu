@@ -3,6 +3,7 @@
 #include <string.h>
 #include "../nn.h"
 #include <cuda.h>
+// #include "nn_cuda.cu"
 
 // Read CSV function
 double **read_csv(const char *filename, int *rows, int *cols, double **targets)
@@ -83,11 +84,11 @@ double **read_csv(const char *filename, int *rows, int *cols, double **targets)
 int main()
 {
     // Network Hyperparameters
-    int input_size = 11;             // Number of features
-    int num_layers = 3;              // Number of layers
-    int layer_sizes[] = {32, 16, 1}; // Number of neurons per layer
-    double learning_rate = 0.01;     // Learning rate
-    int epochs = 100;                // Number of training epochs
+    int input_size = 11;                 // Number of features
+    int num_layers = 4;                  // Number of layers
+    int layer_sizes[] = {11, 22, 11, 1}; // Number of neurons per layer
+    double learning_rate = 0.01;         // Learning rate
+    int epochs = 100;                    // Number of training epochs
 
     // Load the dataset
     int rows, cols;
