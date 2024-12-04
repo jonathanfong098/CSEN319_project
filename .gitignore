@@ -1,0 +1,12 @@
+# Ignore all files in the bin directory
+/bin/
+
+# Ignore all files in the serial directory
+/src/serial/
+
+# Ignore all executables
+*.o
+*.so
+*.exe
+*.dll
+*.bin
